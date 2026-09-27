@@ -1,0 +1,164 @@
+rules_version = '2';
+
+/**
+ * Firestore Security Rules — Classroom Quiz ("shool-quiz")
+ * ==========================================================================
+ * Read the setup guide's "What these rules do and don't protect against"
+ * section alongside this file — it explains the one residual, documented
+ * gap (a student can see their own current question's accepted answers in
+ * their browser before typing, since grading runs client-side on the free
+ * Spark plan). Everything else described below IS fully enforced here.
+ *
+ * Data model recap:
+ *   subjects/{subjectId}                                   — admin only
+ *     questions/{questionId}                                — admin only
+ *   students/{studentId}                (doc id == Auth uid) — roster
+ *   sessions/{sessionId}                                    — no secrets
+ *     participants/{studentId}                              — no secrets
+ *       answers/{questionId}             — THE sensitive collection:
+ *         holds each question's accepted-answers list for grading.
+ *         Readable only by the admin and that one student.
+ *
+ * Design choices called out in the brief are marked [LESSON n] below.
+ */
+
+function isSignedIn() {
+  return request.auth != null;
+}
+
+function isAdmin() {
+  // [LESSON: rule (e)] Single hardcoded admin UID — must match firebase-config.js.
+  return isSignedIn() && request.auth.uid == "mVvrEBE8BfRCiFUncoA0fo2B7i72";
+}
+
+function isOwner(studentId) {
+  return isSignedIn() && request.auth.uid == studentId;
+}
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------------------------------------------------------------------
+    // Subjects + Questions — fully admin-owned. Students/Display never read
+    // these directly; a session's own snapshot is what students use.
+    // ---------------------------------------------------------------------
+    match /subjects/{subjectId} {
+      allow read, write: if isAdmin();
+
+      match /questions/{questionId} {
+        allow read, write: if isAdmin();
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // Student roster. A student may read only their own record, and may
+    // update only their own photo/avatar fields (nothing else — not their
+    // name, email, or login).
+    // ---------------------------------------------------------------------
+    match /students/{studentId} {
+      allow read: if isAdmin() || isOwner(studentId);
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (
+        isOwner(studentId) &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['photoBase64', 'avatarType', 'updatedAt'])
+      );
+    }
+
+    // ---------------------------------------------------------------------
+    // Sessions — top-level session doc holds NO accepted answers, only
+    // metadata (subject name, timer, status, deadline, roster list). Safe
+    // for any signed-in user to read, including the Display view's
+    // anonymous session and every participating student.
+    // ---------------------------------------------------------------------
+    match /sessions/{sessionId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isAdmin();
+
+      // ---------------------------------------------------------------
+      // Participant doc — also secret-free (name, avatar, shuffle order,
+      // live score). This is what powers the real-time leaderboard, so
+      // any signed-in user (including anonymous Display) can read it.
+      // A student may update ONLY their own progress/score fields.
+      //
+      // NOTE ON SCORE INTEGRITY: correctCount/percentage here are a
+      // client-reported convenience value used for the LIVE leaderboard
+      // only. The tamper-proof, official record of each answer's
+      // correctness lives in the answers/ subcollection below, verified
+      // by these rules with no possibility of a student faking a
+      // correct grade. The admin's history/export views always recompute
+      // final scores from that authoritative subcollection, never from
+      // this convenience field. See the setup guide for the full
+      // explanation of this trade-off.
+      // ---------------------------------------------------------------
+      match /participants/{studentId} {
+        allow read: if isSignedIn();
+        allow create, delete: if isAdmin();
+        allow update: if isAdmin() || (
+          isOwner(studentId) &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['currentIndex', 'correctCount', 'answeredCount', 'percentage', 'status', 'updatedAt'])
+        );
+
+        // -------------------------------------------------------------
+        // Answers — THE sensitive collection. Each doc is pre-created
+        // by the admin as an empty "slot" (one per question per
+        // student) containing that question's accepted-answers list.
+        // A student may only ever fill in a slot ONCE, and only while
+        // their own synced session-state fields (copied here directly,
+        // see [LESSON 5]) say the session is live and before its
+        // deadline. Correctness is verified server-side from data
+        // already sitting on this very document — no student input is
+        // trusted for isCorrect.
+        // -------------------------------------------------------------
+        match /answers/{questionId} {
+          allow read: if isAdmin() || isOwner(studentId);
+          allow create, delete: if isAdmin();
+
+          allow update: if isAdmin() || (
+            isOwner(studentId) &&
+
+            // (c) can only ever be answered once
+            resource.data.answered == false &&
+
+            // (d) session must be live and before its deadline, checked
+            // against Firestore's OWN clock (request.time), never the
+            // student's device clock. [LESSON 5]: sessionStatus and
+            // sessionDeadline are synced directly onto THIS document by
+            // the admin on every Start/Pause/Reset/End, so this check
+            // never needs a cross-document get() lookup. A small 5-second
+            // grace period absorbs normal network latency on a
+            // last-second submission.
+            resource.data.sessionStatus == 'live' &&
+            resource.data.sessionDeadline != null &&
+            request.time <= resource.data.sessionDeadline + duration.value(5, 's') &&
+
+            // the submitted answer itself
+            request.resource.data.answered == true &&
+            request.resource.data.studentAnswer is string &&
+            request.resource.data.studentAnswer.size() <= 200 &&
+
+            // TAMPER-PROOFING: isCorrect is re-derived here from the
+            // accepted-answers list already stored on this document
+            // (case-insensitive, exact match, no fuzzy tolerance) — a
+            // student cannot write a self-declared "correct" result
+            // that doesn't actually match.
+            request.resource.data.isCorrect ==
+              resource.data.acceptedAnswersLower.hasAny([request.resource.data.studentAnswer.lower()]) &&
+
+            request.resource.data.autoSubmitted is bool &&
+            request.resource.data.submittedAt == request.time &&
+
+            // nothing else on this document may change in the same write
+            // (question text, accepted answers, ordering, etc. are frozen)
+            request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['answered', 'studentAnswer', 'isCorrect', 'autoSubmitted', 'submittedAt'])
+          );
+        }
+      }
+    }
+
+    // Deny everything else by default (implicit — no catch-all match needed,
+    // Firestore rules default-deny any path with no matching rule).
+  }
+}

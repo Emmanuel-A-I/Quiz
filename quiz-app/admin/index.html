@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Classroom Quiz — Teacher Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎓</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../shared/css/tokens.css">
+<link rel="stylesheet" href="css/admin.css">
+</head>
+<body>
+
+<!-- ===================== LOGIN SCREEN ===================== -->
+<div id="login-screen" class="login-screen">
+  <div class="login-card card">
+    <div class="login-brand">
+      <span class="login-brand-icon">🎓</span>
+      <div>
+        <h1>Classroom Quiz</h1>
+        <p class="login-sub">Teacher Dashboard</p>
+      </div>
+    </div>
+    <form id="login-form">
+      <div class="field">
+        <label for="login-email">Email</label>
+        <input type="email" id="login-email" required autocomplete="username">
+      </div>
+      <div class="field">
+        <label for="login-password">Password</label>
+        <input type="password" id="login-password" required autocomplete="current-password">
+      </div>
+      <p id="login-error" class="form-error" role="alert"></p>
+      <button type="submit" id="login-btn" class="btn btn-primary btn-block">Log in</button>
+    </form>
+  </div>
+</div>
+
+<!-- ===================== APP SHELL ===================== -->
+<div id="app-shell" class="app-shell" style="display:none;">
+
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <span class="sidebar-brand-icon">🎓</span>
+      <span class="sidebar-brand-text">Classroom<br>Quiz</span>
+    </div>
+    <nav class="sidebar-nav">
+      <button class="nav-item active" data-section="overview">
+        <span class="nav-icon">🏠</span> Overview
+      </button>
+      <button class="nav-item" data-section="subjects">
+        <span class="nav-icon">📚</span> Subjects
+      </button>
+      <button class="nav-item" data-section="roster">
+        <span class="nav-icon">🧑‍🎓</span> Roster
+      </button>
+      <button class="nav-item" data-section="sessions">
+        <span class="nav-icon">🟢</span> Live Sessions
+      </button>
+      <button class="nav-item" data-section="history">
+        <span class="nav-icon">🗂️</span> History
+      </button>
+    </nav>
+    <div class="sidebar-footer">
+      <button id="logout-btn" class="btn btn-ghost btn-block btn-sm">Log out</button>
+    </div>
+  </aside>
+
+  <main class="main-area">
+    <header class="topbar">
+      <h2 id="topbar-title">Overview</h2>
+      <a href="../display/index.html" target="_blank" class="btn btn-secondary btn-sm">Open Display View ↗</a>
+    </header>
+
+    <div class="content">
+
+      <!-- ============ OVERVIEW ============ -->
+      <section id="section-overview" class="page">
+        <div class="stat-grid">
+          <div class="card stat-card">
+            <span class="stat-label">Subjects</span>
+            <span class="stat-value" id="stat-subjects">–</span>
+          </div>
+          <div class="card stat-card">
+            <span class="stat-label">Students in roster</span>
+            <span class="stat-value" id="stat-students">–</span>
+          </div>
+          <div class="card stat-card">
+            <span class="stat-label">Live / paused sessions</span>
+            <span class="stat-value" id="stat-live">–</span>
+          </div>
+          <div class="card stat-card">
+            <span class="stat-label">Past sessions</span>
+            <span class="stat-value" id="stat-history">–</span>
+          </div>
+        </div>
+        <div class="card" style="margin-top:24px;">
+          <h3>Quick start</h3>
+          <p>1. Add a subject and its questions under <strong>Subjects</strong>.</p>
+          <p>2. Add your students under <strong>Roster</strong> (up to 10).</p>
+          <p>3. Create and run a quiz under <strong>Live Sessions</strong>.</p>
+          <p>4. Leave the <strong>Display View</strong> open on your projector — it updates itself.</p>
+        </div>
+      </section>
+
+      <!-- ============ SUBJECTS ============ -->
+      <section id="section-subjects" class="page" style="display:none;">
+        <div class="page-header">
+          <h3>Subjects &amp; questions</h3>
+          <button id="btn-add-subject" class="btn btn-primary">+ Add subject</button>
+        </div>
+        <div class="two-pane">
+          <div class="card pane-list" id="subjects-list"><p class="empty-hint">No subjects yet.</p></div>
+          <div class="card pane-detail" id="questions-panel">
+            <p class="empty-hint">Select a subject on the left to manage its questions.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ ROSTER ============ -->
+      <section id="section-roster" class="page" style="display:none;">
+        <div class="page-header">
+          <h3>Student roster <span class="page-header-sub" id="roster-count-label"></span></h3>
+          <button id="btn-add-student" class="btn btn-primary">+ Add student</button>
+        </div>
+        <div class="roster-grid" id="roster-list"><p class="empty-hint">No students added yet.</p></div>
+      </section>
+
+      <!-- ============ SESSIONS ============ -->
+      <section id="section-sessions" class="page" style="display:none;">
+        <div class="page-header">
+          <h3>Live sessions</h3>
+          <button id="btn-create-session" class="btn btn-primary">+ Create session</button>
+        </div>
+        <div id="sessions-list" class="sessions-list"><p class="empty-hint">No sessions running. Create one to get started.</p></div>
+      </section>
+
+      <!-- ============ HISTORY ============ -->
+      <section id="section-history" class="page" style="display:none;">
+        <div class="page-header">
+          <h3>Session history</h3>
+          <button id="btn-clear-all-history" class="btn btn-ghost">Clear all history…</button>
+        </div>
+        <div id="history-list" class="sessions-list"><p class="empty-hint">No ended sessions yet.</p></div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+
+<!-- Firebase (compat SDK — plain <script> tags, no build step) -->
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+
+<!-- PDF export -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+<!-- Shared -->
+<script src="../shared/js/firebase-config.js"></script>
+<script src="../shared/js/error-messages.js"></script>
+<script src="../shared/js/avatars.js"></script>
+<script src="../shared/js/utils.js"></script>
+
+<!-- Admin -->
+<script src="js/app-init.js"></script>
+<script src="js/modal.js"></script>
+<script src="js/admin-auth.js"></script>
+<script src="js/admin-subjects.js"></script>
+<script src="js/admin-roster.js"></script>
+<script src="js/admin-sessions.js"></script>
+<script src="js/admin-history.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

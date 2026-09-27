@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Classroom Quiz — Live Leaderboard</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏆</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../shared/css/tokens.css">
+<link rel="stylesheet" href="css/display.css">
+</head>
+<body>
+
+<div class="display-wrap">
+  <header class="display-header">
+    <span class="display-header-icon">🎓</span>
+    <h1>Classroom Quiz — Live</h1>
+  </header>
+
+  <main id="display-main">
+    <div id="idle-screen" class="idle-screen">
+      <span class="big-emoji">📺</span>
+      <h2>Waiting for a quiz to start…</h2>
+      <p>This screen updates automatically the moment your teacher starts a session.</p>
+    </div>
+    <div id="sessions-grid" class="sessions-grid"></div>
+  </main>
+</div>
+
+<div id="toast-root"></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+
+<script src="../shared/js/firebase-config.js"></script>
+<script src="../shared/js/error-messages.js"></script>
+<script src="../shared/js/avatars.js"></script>
+<script src="../shared/js/utils.js"></script>
+
+<script src="js/app-init.js"></script>
+<script src="js/display.js"></script>
+</body>
+</html>
