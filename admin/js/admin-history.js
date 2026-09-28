@@ -11,6 +11,36 @@ function initHistory() {
   document.getElementById("btn-clear-all-history").addEventListener("click", _confirmClearAllHistory);
 }
 
+function _summaryHtml(s) {
+  const sm = s.summary;
+  if (!sm) {
+    return `<p class="session-meta" style="margin-top:12px;">No summary saved for this session yet.</p>
+            <button class="btn btn-secondary btn-sm" data-gen="${s.id}">Generate summary</button>`;
+  }
+  const winners = (sm.winners || []).map(escapeHtml).join(" &amp; ");
+  return `
+    <div class="summary-grid">
+      <div class="summary-stat"><span>${(sm.winners || []).length > 1 ? "Winners (tie)" : "Winner"}</span><strong>🏆 ${winners || "—"}</strong></div>
+      <div class="summary-stat"><span>Students</span><strong>${sm.participantCount}</strong></div>
+      <div class="summary-stat"><span>Questions</span><strong>${sm.questionCount}</strong></div>
+      <div class="summary-stat"><span>Average score</span><strong>${sm.averagePercentage}%</strong></div>
+      <div class="summary-stat"><span>Highest</span><strong>${sm.highestPercentage}%</strong></div>
+      <div class="summary-stat"><span>Lowest</span><strong>${sm.lowestPercentage}%</strong></div>
+    </div>
+    <table class="leaderboard-table">
+      <thead><tr><th>#</th><th>Student</th><th>Score</th><th>Result</th></tr></thead>
+      <tbody>
+        ${(sm.results || []).map((r) => `
+          <tr>
+            <td class="leaderboard-rank">${r.rank}</td>
+            <td>${escapeHtml(r.name)}</td>
+            <td class="leaderboard-pct">${r.correctCount}/${r.totalQuestions} · ${r.percentage}%</td>
+            <td class="leaderboard-bar-cell"><div class="progress-track"><div class="progress-fill" style="width:${r.percentage}%;"></div></div></td>
+          </tr>`).join("")}
+      </tbody>
+    </table>`;
+}
+
 function renderHistoryList() {
   const el = document.getElementById("history-list");
   const sessions = _endedSessions();
@@ -25,26 +55,31 @@ function renderHistoryList() {
       <div class="session-card-head">
         <div class="session-title-wrap">
           <div class="session-title"><h4>${escapeHtml(s.subjectName)}</h4>${_statusBadge("ended")}</div>
-          <div class="session-meta">${s.studentIds.length} students · ${s.questionCount} questions · Ended ${formatDateTime(s.endedAt)}</div>
+          <div class="session-meta">${(s.studentIds || []).length} students · ${s.questionCount} ${s.subjectType === "spelling" ? "words" : "questions"} · ${s.timerMinutes} min timer · Ended ${formatDateTime(s.endedAt)}</div>
         </div>
       </div>
-      <div class="session-controls">
-        <button class="btn btn-secondary btn-sm" data-view="${s.id}">View results</button>
+      ${_summaryHtml(s)}
+      <div class="session-controls" style="margin-top:14px;">
         <button class="btn btn-secondary btn-sm" data-csv="${s.id}">Export CSV</button>
         <button class="btn btn-secondary btn-sm" data-pdf="${s.id}">Export PDF</button>
         <button class="btn btn-ghost btn-sm" data-del="${s.id}">Delete permanently</button>
       </div>
-      <div data-history-detail-for="${s.id}"></div>
     </div>
   `
     )
     .join("");
 
   sessions.forEach((s) => {
-    document.querySelector(`[data-view="${s.id}"]`).addEventListener("click", () => _toggleHistoryDetail(s));
     document.querySelector(`[data-csv="${s.id}"]`).addEventListener("click", () => _exportCsv(s));
     document.querySelector(`[data-pdf="${s.id}"]`).addEventListener("click", () => _exportPdf(s));
     document.querySelector(`[data-del="${s.id}"]`).addEventListener("click", () => deleteSession(s));
+    const gen = document.querySelector(`[data-gen="${s.id}"]`);
+    if (gen) gen.addEventListener("click", async () => {
+      gen.disabled = true;
+      gen.innerHTML = '<span class="spinner"></span> Working…';
+      try { await _finalizeSession(s); showToast("Summary saved.", "success"); }
+      catch (err) { showErrorToast(err); gen.disabled = false; gen.textContent = "Generate summary"; }
+    });
   });
 }
 
@@ -60,6 +95,14 @@ async function _computeSessionResults(session) {
       .map((d) => ({ id: d.id, ...d.data() }))
       .sort((a, b) => (a.order || 0) - (b.order || 0));
 
+    // Smart-graded subjects: re-grade from the locked-in typed text, never trusting the student's own claim.
+    rows.forEach((r) => {
+      if ((r.gradingMode || "exact") === "smart" && r.answered === true) {
+        const graded = isAnswerAcceptable(r.studentAnswer, r.acceptedAnswersLower, "smart");
+        if (r.isCorrect !== graded) { r.isCorrect = graded; r._needsWrite = true; }
+      }
+    });
+
     const correctCount = rows.filter((r) => r.isCorrect === true).length;
     const totalQuestions = rows.length;
     const percentage = totalQuestions > 0 ? Math.round((correctCount / totalQuestions) * 100) : 0;
@@ -72,40 +115,6 @@ async function _computeSessionResults(session) {
   ranked.forEach((r) => (r.isWinner = r.rank === topRank));
   ranked.sort((a, b) => a.rank - b.rank);
   return ranked;
-}
-
-async function _toggleHistoryDetail(session) {
-  const el = document.querySelector(`[data-history-detail-for="${session.id}"]`);
-  if (!el) return;
-  if (el.dataset.open === "true") {
-    el.innerHTML = "";
-    el.dataset.open = "false";
-    return;
-  }
-  el.innerHTML = `<p class="empty-hint">Loading results…</p>`;
-  try {
-    const results = await _computeSessionResults(session);
-    el.innerHTML = `
-      <table class="leaderboard-table" style="margin-top:16px;">
-        <thead><tr><th>#</th><th>Student</th><th>Score</th><th></th></tr></thead>
-        <tbody>
-          ${results
-            .map(
-              (r) => `<tr>
-                <td class="leaderboard-rank">${r.rank}</td>
-                <td><div class="leaderboard-name-cell">${avatarImgHtml(r, 34)}<span>${escapeHtml(r.name)}${r.isWinner ? " 🏆" : ""}</span></div></td>
-                <td class="leaderboard-pct">${r.correctCount}/${r.totalQuestions} · ${r.percentage}%</td>
-                <td></td>
-              </tr>`
-            )
-            .join("")}
-        </tbody>
-      </table>
-    `;
-    el.dataset.open = "true";
-  } catch (err) {
-    el.innerHTML = `<p class="empty-hint">${escapeHtml(translateError(err))}</p>`;
-  }
 }
 
 // -------------------------------------------------------------- CSV export
@@ -123,9 +132,9 @@ async function _exportCsv(session) {
     results.forEach((r) => {
       csv += csvRow([`Student: ${r.name}`, `Score: ${r.correctCount}/${r.totalQuestions} (${r.percentage}%)`, r.isWinner ? "WINNER" : ""]);
       csv += csvRow(["Question", "Their answer", "Correct answer", "Result"]);
-      r.rows.forEach((row) => {
+      r.rows.forEach((row, i) => {
         csv += csvRow([
-          row.questionText,
+          row.questionText || `Word ${i + 1}`,
           row.studentAnswer == null ? "(no answer)" : row.studentAnswer,
           (row.acceptedAnswersDisplay || []).join(" / "),
           row.isCorrect == null ? "Not answered" : row.isCorrect ? "Correct" : "Incorrect",
@@ -171,7 +180,7 @@ async function _exportPdf(session) {
 
       r.rows.forEach((row, i) => {
         ensureSpace(44);
-        const qLines = doc.splitTextToSize(`${i + 1}. ${row.questionText}`, pageWidth - marginX * 2);
+        const qLines = doc.splitTextToSize(row.questionText ? `${i + 1}. ${row.questionText}` : `Word ${i + 1}`, pageWidth - marginX * 2);
         doc.setFont("helvetica", "bold"); doc.text(qLines, marginX, y); y += qLines.length * 12;
         doc.setFont("helvetica", "normal");
         const theirs = row.studentAnswer == null ? "(no answer)" : row.studentAnswer;

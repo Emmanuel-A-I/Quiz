@@ -97,6 +97,13 @@ function _showState(name) {
   document.getElementById("header-subject").textContent = _session ? _session.subjectName : "";
 }
 
+/** True once the deadline plus the server's grace period has passed. */
+function _isPastDeadline() {
+  return !!(_session && _session.deadline && Date.now() > _session.deadline.toMillis() + 6000);
+}
+
+let _timeoutViewShownFor = null;
+
 function _renderForCurrentState() {
   if (!_session) { _showState("none"); return; }
   if (!_participant || Object.keys(_answers).length === 0) { _showState("loading"); return; }
@@ -106,6 +113,10 @@ function _renderForCurrentState() {
     _showState("waiting");
   } else if (_session.status === "paused") {
     _showState("paused");
+  } else if (_session.status === "live" && _isPastDeadline()) {
+    // Time is up (the teacher's screen will close the session shortly): show the result now.
+    _showState("finished");
+    _renderFinished();
   } else if (_session.status === "live") {
     _showState("quiz");
     _renderQuizQuestion();
@@ -151,18 +162,42 @@ function _renderQuizQuestion() {
     <div class="question-card-text" id="question-text"></div>
     <div id="answer-form-wrap"></div>
   `;
-  document.getElementById("question-text").textContent = answerDoc ? answerDoc.questionText : "…";
+  const isSpelling = _session.subjectType === "spelling";
+  // Spelling Bee: no word/question is ever shown — just "Word N".
+  document.getElementById("question-text").textContent = isSpelling ? `Word ${idx + 1}` : (answerDoc ? answerDoc.questionText : "…");
 
   const formWrap = document.getElementById("answer-form-wrap");
 
   if (answerDoc && answerDoc.answered) {
+    const mcqReview = answerDoc.answerType === "mcq" && Array.isArray(answerDoc.acceptedAnswersDisplay)
+      ? `<div class="mcq-options" style="margin-top:14px;">${(answerDoc.options || []).map((opt) => {
+        const isCorrectOpt = opt === answerDoc.acceptedAnswersDisplay[0];
+        const isPicked = opt === answerDoc.studentAnswer;
+        let cls = "mcq-option-btn";
+        if (isCorrectOpt) cls += " mcq-correct";
+        else if (isPicked) cls += " mcq-wrong";
+        return `<div class="${cls}">${isPicked && !isCorrectOpt ? "✗ " : isCorrectOpt ? "✓ " : ""}${escapeHtml(opt)}</div>`;
+      }).join("")}</div>`
+      : `<p class="hint" style="margin-top:10px;">Your answer: <strong>${escapeHtml(answerDoc.studentAnswer || "(no answer)")}</strong></p>`;
     formWrap.innerHTML = `
       <div class="result-badge ${answerDoc.isCorrect ? "correct" : "incorrect"}">${answerDoc.isCorrect ? "✓ Correct" : "✗ Incorrect"}</div>
-      <p class="hint" style="margin-top:10px;">Your answer: <strong>${escapeHtml(answerDoc.studentAnswer || "(no answer)")}</strong></p>
+      ${mcqReview}
     `;
+  } else if (answerDoc && answerDoc.answerType === "mcq") {
+    formWrap.innerHTML = `<div class="mcq-options" id="mcq-options"></div>`;
+    const optWrap = document.getElementById("mcq-options");
+    (answerDoc.options || []).forEach((opt) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "mcq-option-btn mcq-pick";
+      btn.textContent = opt;
+      btn.disabled = _session.status !== "live";
+      btn.addEventListener("click", () => _handleManualSubmit(qId, opt));
+      optWrap.appendChild(btn);
+    });
   } else {
     formWrap.innerHTML = `
-      <input type="text" id="answer-input" class="answer-input" placeholder="Type your answer…" autocomplete="off" maxlength="200" ${_session.status !== "live" ? "disabled" : ""}>
+      <input type="text" id="answer-input" class="answer-input" placeholder="${isSpelling ? "Type the word you heard…" : "Type your answer…"}" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="200" ${_session.status !== "live" ? "disabled" : ""}>
       <button id="submit-answer-btn" class="btn btn-primary btn-block" ${_session.status !== "live" ? "disabled" : ""}>Submit answer</button>
     `;
     const input = document.getElementById("answer-input");
@@ -188,11 +223,14 @@ function _renderDots(order, currentIdx) {
     .join("");
 }
 
-async function _handleManualSubmit(qId) {
+async function _handleManualSubmit(qId, directValue) {
   const input = document.getElementById("answer-input");
   const btn = document.getElementById("submit-answer-btn");
-  const text = input ? input.value : "";
+  const text = directValue !== undefined ? directValue : (input ? input.value : "");
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Submitting…'; }
+  if (directValue !== undefined) {
+    document.querySelectorAll(".mcq-pick").forEach((b) => (b.disabled = true));
+  }
   try {
     await _submitAnswer(qId, text, false);
     delete _drafts[qId];
@@ -227,7 +265,7 @@ async function _submitAnswer(qId, text, autoSubmitted) {
   const answerDoc = _answers[qId];
   if (!answerDoc || answerDoc.answered) return;
   const trimmed = (text || "").trim();
-  const isCorrect = isAnswerCorrect(trimmed, answerDoc.acceptedAnswersLower);
+  const isCorrect = isAnswerAcceptable(trimmed, answerDoc.acceptedAnswersLower, answerDoc.gradingMode || "exact");
 
   const answerRef = studentDb.collection("sessions").doc(_session.id).collection("participants").doc(_uid).collection("answers").doc(qId);
   await answerRef.update({
@@ -289,6 +327,10 @@ function _tick() {
     timerEl.classList.toggle("low-time", remainingSec <= 10 && remainingSec > 0);
   }
   if (remainingMs <= 0) _autoSubmitCurrentIfNeeded();
+  if (_isPastDeadline() && _timeoutViewShownFor !== _session.id + ":" + _session.deadline.toMillis()) {
+    _timeoutViewShownFor = _session.id + ":" + _session.deadline.toMillis();
+    _renderForCurrentState();
+  }
 }
 
 // ---------------------------------------------------------------- Finished
@@ -299,7 +341,7 @@ function _renderFinished() {
   const rows = order.map((qId, i) => {
     const a = _answers[qId];
     if (a && a.isCorrect) correctCount++;
-    return { i, text: a ? a.questionText : "", studentAnswer: a ? a.studentAnswer : null, isCorrect: a ? a.isCorrect : false, answered: a ? a.answered : false };
+    return { i, text: (_session.subjectType === "spelling") ? `Word ${i + 1}` : (a ? a.questionText : ""), studentAnswer: a ? a.studentAnswer : null, isCorrect: a ? a.isCorrect : false, answered: a ? a.answered : false };
   });
   const total = order.length;
   const pct = total > 0 ? Math.round((correctCount / total) * 100) : 0;

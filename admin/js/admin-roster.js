@@ -135,6 +135,10 @@ function openAddStudentModal() {
         const fileInput = modal.querySelector("#s-photo");
 
         if (password.length < 6) { errEl.textContent = "Password must be at least 6 characters."; return; }
+        if (AdminState.students.some((st) => (st.email || "").toLowerCase() === email.toLowerCase())) {
+          errEl.textContent = "A student with this email is already in your roster.";
+          return;
+        }
 
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<span class="spinner"></span> Creating…';
@@ -146,10 +150,28 @@ function openAddStudentModal() {
 
           // Create the Auth account on an isolated, in-memory-only secondary
           // app instance so the admin's own login session is never touched.
-          const uid = await withEphemeralAuth(async (ephemeralAuth) => {
-            const cred = await ephemeralAuth.createUserWithEmailAndPassword(email, password);
-            return cred.user.uid;
-          });
+          let uid;
+          try {
+            uid = await withEphemeralAuth(async (ephemeralAuth) => {
+              const cred = await ephemeralAuth.createUserWithEmailAndPassword(email, password);
+              return cred.user.uid;
+            });
+          } catch (createErr) {
+            if (!createErr || createErr.code !== "auth/email-already-in-use") throw createErr;
+            // A login for this email is left over from a student who was removed
+            // earlier. If the password typed here is the one it had, re-use it.
+            try {
+              uid = await withEphemeralAuth(async (ephemeralAuth) => {
+                const cred = await ephemeralAuth.signInWithEmailAndPassword(email, password);
+                return cred.user.uid;
+              });
+            } catch (signInErr) {
+              throw Object.assign(new Error("orphan login"), { code: "app/orphan-login" });
+            }
+            if (AdminState.students.some((st) => st.id === uid)) {
+              throw Object.assign(new Error("already in roster"), { code: "app/already-in-roster" });
+            }
+          }
 
           await adminDb.collection("students").doc(uid).set({
             name, email,
@@ -243,11 +265,22 @@ function openEditStudentModal(student) {
 
 // --------------------------------------------------------- Change password
 
+function _isCredentialError(err) {
+  const c = (err && err.code) || "";
+  return ["auth/invalid-credential", "auth/wrong-password", "auth/missing-password", "auth/invalid-login-credentials", "auth/argument-error"].some((k) => c.includes(k));
+}
+
 function openChangePasswordModal(student) {
+  const needsCurrent = !student.currentPassword;
   openModal(
     `
     <h3>Change password for ${escapeHtml(student.name)}</h3>
     <form id="pw-form">
+      <div class="field" id="current-pw-wrap" style="${needsCurrent ? "" : "display:none;"}">
+        <label for="current-pw">Current password</label>
+        <input type="text" id="current-pw" autocomplete="off">
+        <p class="hint">The app doesn't have this student's current password saved (they were added before passwords were saved, or it has changed). Enter it once here.</p>
+      </div>
       <div class="field">
         <label for="new-password">New password</label>
         <input type="text" id="new-password" required minlength="6">
@@ -268,13 +301,19 @@ function openChangePasswordModal(student) {
         const submitBtn = modal.querySelector("#submit-btn");
         errEl.textContent = "";
         const newPassword = modal.querySelector("#new-password").value;
+        const currentPassword = modal.querySelector("#current-pw").value || student.currentPassword;
         if (newPassword.length < 6) { errEl.textContent = "Password must be at least 6 characters."; return; }
+        if (!currentPassword) {
+          errEl.textContent = "Please enter the student's current password.";
+          modal.querySelector("#current-pw-wrap").style.display = "";
+          return;
+        }
 
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<span class="spinner"></span> Updating…';
         try {
           await withEphemeralAuth(async (ephemeralAuth) => {
-            await ephemeralAuth.signInWithEmailAndPassword(student.email, student.currentPassword);
+            await ephemeralAuth.signInWithEmailAndPassword(student.email, currentPassword);
             await ephemeralAuth.currentUser.updatePassword(newPassword);
           });
           await adminDb.collection("students").doc(student.id).update({
@@ -284,7 +323,13 @@ function openChangePasswordModal(student) {
           closeModal();
           showToast(`Password changed for ${student.name}.`, "success");
         } catch (err) {
-          errEl.textContent = translateError(err);
+          console.error("[change password]", err);
+          if (_isCredentialError(err)) {
+            errEl.textContent = "The current password doesn't match this student's login. Please enter the password they use now.";
+            modal.querySelector("#current-pw-wrap").style.display = "";
+          } else {
+            errEl.textContent = translateError(err);
+          }
           submitBtn.disabled = false;
           submitBtn.textContent = "Change password";
         }
@@ -296,42 +341,89 @@ function openChangePasswordModal(student) {
 // -------------------------------------------------------------- Delete
 
 async function deleteStudent(student) {
-  let blocking = false;
+  let blockingNames = [];
   try {
     const snap = await adminDb.collection("sessions").where("studentIds", "array-contains", student.id).get();
-    blocking = snap.docs.some((d) => ["live", "paused"].includes(d.data().status));
+    blockingNames = snap.docs.filter((d) => ["live", "paused"].includes(d.data().status)).map((d) => d.data().subjectName || "a session");
   } catch (err) { showErrorToast(err); return; }
 
-  if (blocking) {
-    showToast(`${student.name} is currently in a live or paused session. End it before deleting this student.`, "error", 6000);
+  if (blockingNames.length) {
+    openModal(
+      `
+      <h3>${escapeHtml(student.name)} is in a running session</h3>
+      <p>They're currently part of: <strong>${blockingNames.map(escapeHtml).join(", ")}</strong>. Go to <strong>Live Sessions</strong> and End that session first, then delete the student.</p>
+      <button type="button" class="btn btn-secondary" id="cancel-btn">OK</button>
+    `,
+      (modal) => modal.querySelector("#cancel-btn").addEventListener("click", closeModal)
+    );
     return;
   }
 
+  const needsPw = !student.currentPassword;
   openModal(
     `
     <h3>Delete ${escapeHtml(student.name)}?</h3>
     <p>This permanently deletes their login and roster record. Their results in past (ended) sessions are kept for your history and exports.</p>
+    <div class="field" id="del-pw-wrap" style="${needsPw ? "" : "display:none;"}">
+      <label for="del-pw">Student's current password</label>
+      <input type="text" id="del-pw" autocomplete="off">
+      <p class="hint">Needed once to remove their login, because the app doesn't have it saved. Don't know it? Use "Remove from roster only" below.</p>
+    </div>
     <p id="del-error" class="form-error" role="alert"></p>
-    <div style="display:flex; gap:10px; margin-top:20px;">
+    <div style="display:flex; gap:10px; margin-top:20px; flex-wrap:wrap;">
       <button type="button" class="btn btn-secondary" id="cancel-btn">Cancel</button>
       <button type="button" class="btn btn-danger" id="confirm-btn">Delete student</button>
+      <button type="button" class="btn btn-ghost" id="force-btn" style="${needsPw ? "" : "display:none;"}">Remove from roster only</button>
     </div>
   `,
     (modal) => {
+      const errEl = modal.querySelector("#del-error");
+      const forceBtn = modal.querySelector("#force-btn");
+      const pwWrap = modal.querySelector("#del-pw-wrap");
       modal.querySelector("#cancel-btn").addEventListener("click", closeModal);
+
       modal.querySelector("#confirm-btn").addEventListener("click", async () => {
-        const errEl = modal.querySelector("#del-error");
+        errEl.textContent = "";
+        const password = modal.querySelector("#del-pw").value || student.currentPassword;
+        if (!password) {
+          errEl.textContent = "Please enter the student's current password, or use “Remove from roster only”.";
+          pwWrap.style.display = ""; forceBtn.style.display = "";
+          return;
+        }
+        const confirmBtn = modal.querySelector("#confirm-btn");
+        confirmBtn.disabled = true;
         try {
-          await withEphemeralAuth(async (ephemeralAuth) => {
-            await ephemeralAuth.signInWithEmailAndPassword(student.email, student.currentPassword);
-            await ephemeralAuth.currentUser.delete();
-          });
+          try {
+            await withEphemeralAuth(async (ephemeralAuth) => {
+              await ephemeralAuth.signInWithEmailAndPassword(student.email, password);
+              await ephemeralAuth.currentUser.delete();
+            });
+          } catch (authErr) {
+            // If the login is already gone there is nothing left to delete there.
+            if (!(authErr && String(authErr.code).includes("auth/user-not-found"))) throw authErr;
+          }
           await adminDb.collection("students").doc(student.id).delete();
           closeModal();
           showToast(`${student.name} was deleted.`, "success");
         } catch (err) {
-          errEl.textContent = translateError(err);
+          console.error("[delete student]", err);
+          confirmBtn.disabled = false;
+          if (_isCredentialError(err)) {
+            errEl.textContent = "That password doesn't match this student's login. Enter the password they use now, or remove them from the roster only (their old login then stays in Firebase under Authentication until you delete it there).";
+            pwWrap.style.display = "";
+          } else {
+            errEl.textContent = translateError(err);
+          }
+          forceBtn.style.display = "";
         }
+      });
+
+      forceBtn.addEventListener("click", async () => {
+        try {
+          await adminDb.collection("students").doc(student.id).delete();
+          closeModal();
+          showToast(`${student.name} was removed from the roster.`, "success");
+        } catch (err) { showErrorToast(err); }
       });
     }
   );

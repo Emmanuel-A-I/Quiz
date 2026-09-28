@@ -23,13 +23,19 @@ function initSessions() {
   adminDb.collection("sessions").onSnapshot(
     (snap) => {
       AdminState.sessions = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      renderSessionsList();
-      renderHistoryList();
+      try { renderSessionsList(); } catch (err) {
+        console.error("[render live sessions]", err);
+        document.getElementById("sessions-list").innerHTML =
+          `<p class="empty-hint">Sessions exist but couldn't be displayed. Please press F12, open Console, and send the red error to your developer.</p>`;
+      }
+      try { renderHistoryList(); } catch (err) { console.error("[render history]", err); }
       document.dispatchEvent(new CustomEvent("admin:sessions-updated"));
     },
     (err) => {
       console.error("[sessions listener]", err);
       showErrorToast(err);
+      document.getElementById("sessions-list").innerHTML =
+        `<p class="empty-hint">Couldn't load sessions. ${escapeHtml(translateError(err))}</p>`;
     }
   );
 
@@ -88,14 +94,14 @@ function openCreateSessionModal() {
         <label>Students (choose 2–10)</label>
         <div class="checklist">
           ${AdminState.students
-            .map((s) => {
-              const disabled = busy.has(s.id);
-              return `<label class="${disabled ? "disabled" : ""}">
+      .map((s) => {
+        const disabled = busy.has(s.id);
+        return `<label class="${disabled ? "disabled" : ""}">
                 <input type="checkbox" value="${s.id}" ${disabled ? "disabled" : ""}>
                 ${escapeHtml(s.name)} ${disabled ? "<em>(busy in another session)</em>" : ""}
               </label>`;
-            })
-            .join("")}
+      })
+      .join("")}
         </div>
       </div>
       <p id="cs-error" class="form-error" role="alert"></p>
@@ -129,9 +135,9 @@ function openCreateSessionModal() {
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<span class="spinner"></span> Creating…';
         try {
-          await _createSession(subjectId, timerMinutes, studentIds);
+          const startedNow = await _createSession(subjectId, timerMinutes, studentIds);
           closeModal();
-          showToast("Session created.", "success");
+          showToast(startedNow ? "Spelling Bee started — students can type their answers now." : "Session created.", "success");
         } catch (err) {
           errEl.textContent = translateError(err);
           submitBtn.disabled = false;
@@ -145,8 +151,18 @@ function openCreateSessionModal() {
 async function _createSession(subjectId, timerMinutes, studentIds) {
   const subject = AdminState.subjects.find((s) => s.id === subjectId);
   const qSnap = await adminDb.collection("subjects").doc(subjectId).collection("questions").get();
-  const questions = qSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  const questions = sortByCreated(qSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
   if (questions.length === 0) throw new Error("This subject has no questions.");
+
+  // Spelling Bee: everyone gets the SAME words in the teacher's order (no
+  // shuffling), and the word itself is never stored as visible question text.
+  const isSpelling = isSpellingBeeName(subject.name);
+
+  // Spelling Bee starts the moment it's created: live status + a running deadline.
+  const deadline = isSpelling
+    ? firebase.firestore.Timestamp.fromMillis(Date.now() + timerMinutes * 60 * 1000)
+    : null;
+  const initialStatus = isSpelling ? "live" : "ready";
 
   const timerSeconds = timerMinutes * 60;
   const sessionRef = adminDb.collection("sessions").doc();
@@ -156,20 +172,20 @@ async function _createSession(subjectId, timerMinutes, studentIds) {
   ops.push({
     ref: sessionRef,
     data: {
-      subjectId, subjectName: subject.name, subjectType: subject.type,
+      subjectId, subjectName: subject.name, subjectType: isSpelling ? "spelling" : "general",
       timerMinutes, timerSeconds, remainingSeconds: timerSeconds,
       studentIds, questionIds, questionCount: questions.length,
-      status: "ready", deadline: null, resetToken: 0,
+      status: initialStatus, deadline, resetToken: 0,
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-      startedAt: null, pausedAt: null, endedAt: null,
+      startedAt: isSpelling ? firebase.firestore.FieldValue.serverTimestamp() : null, pausedAt: null, endedAt: null,
       createdBy: ADMIN_UID,
     },
   });
 
   studentIds.forEach((studentId) => {
     const student = AdminState.students.find((s) => s.id === studentId);
-    const order = shuffleArray(questionIds);
+    const order = isSpelling ? questionIds.slice() : shuffleArray(questionIds);
     const participantRef = sessionRef.collection("participants").doc(studentId);
     ops.push({
       ref: participantRef,
@@ -178,7 +194,7 @@ async function _createSession(subjectId, timerMinutes, studentIds) {
         order, currentIndex: 0,
         correctCount: 0, answeredCount: 0, totalQuestions: questions.length, percentage: 0,
         status: "in_progress",
-        sessionStatus: "ready", sessionDeadline: null, resetToken: 0,
+        sessionStatus: initialStatus, sessionDeadline: deadline, resetToken: 0,
         joinedAt: firebase.firestore.FieldValue.serverTimestamp(),
         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       },
@@ -188,18 +204,22 @@ async function _createSession(subjectId, timerMinutes, studentIds) {
       ops.push({
         ref: answerRef,
         data: {
-          questionId: q.id, questionText: q.text,
+          questionId: q.id, questionText: isSpelling ? "" : q.text,
           acceptedAnswersLower: toLowerList(q.acceptedAnswers),
           acceptedAnswersDisplay: q.acceptedAnswers,
+          answerType: isSpelling ? "typed" : (q.answerType || "typed"),
+          options: (!isSpelling && q.answerType === "mcq") ? q.options : null,
+          gradingMode: (isSpelling || q.answerType === "mcq") ? "exact" : "smart",
           order: order.indexOf(q.id),
           answered: false, studentAnswer: null, isCorrect: null, autoSubmitted: false, submittedAt: null,
-          sessionStatus: "ready", sessionDeadline: null, resetToken: 0,
+          sessionStatus: initialStatus, sessionDeadline: deadline, resetToken: 0,
         },
       });
     });
   });
 
   await _commitOpsInChunks(ops, "set");
+  return isSpelling;
 }
 
 /** Commits {ref,data} ops in Firestore batch-write chunks (max 450 per batch, under the 500 limit). */
@@ -247,19 +267,33 @@ function renderSessionsList() {
   const el = document.getElementById("sessions-list");
   const sessions = _activeSessions();
   if (sessions.length === 0) {
-    el.innerHTML = `<p class="empty-hint">No sessions running. Create one to get started.</p>`;
+    const total = AdminState.sessions.length;
+    el.innerHTML = `<p class="empty-hint">No sessions running. Create one to get started.${total ? ` (${total} finished session${total === 1 ? "" : "s"} can be found under History.)` : ""}</p>`;
     // detach any stray leaderboard listeners
     _sessionLeaderboardUnsubs.forEach((unsub) => unsub());
     _sessionLeaderboardUnsubs.clear();
     return;
   }
 
-  el.innerHTML = sessions.map((s) => _sessionCardHtml(s)).join("");
+  el.innerHTML = sessions
+    .map((s) => {
+      try { return _sessionCardHtml(s); }
+      catch (err) { console.error("[session card]", s.id, err); return _brokenSessionCardHtml(s); }
+    })
+    .join("");
 
   sessions.forEach((s) => {
-    _wireSessionCard(s);
-    if (!_sessionLeaderboardUnsubs.has(s.id)) _attachLeaderboardListener(s.id);
+    try {
+      _wireSessionCard(s);
+      if (!_sessionLeaderboardUnsubs.has(s.id)) _attachLeaderboardListener(s.id);
+    } catch (err) { console.error("[wire session card]", s.id, err); }
   });
+  el.querySelectorAll("[data-remove-broken]").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      const sess = AdminState.sessions.find((x) => x.id === btn.dataset.removeBroken);
+      if (sess) deleteSession(sess);
+    })
+  );
 
   // Detach listeners for sessions that disappeared (ended+moved to history, or deleted)
   const liveIds = new Set(sessions.map((s) => s.id));
@@ -269,6 +303,16 @@ function renderSessionsList() {
       _sessionLeaderboardUnsubs.delete(id);
     }
   });
+}
+
+/** Fallback card so a malformed session can still be seen and removed. */
+function _brokenSessionCardHtml(s) {
+  return `
+    <div class="card session-card" data-session-id="${s.id}">
+      <div class="session-title"><h4>${escapeHtml(s.subjectName || "Unnamed session")}</h4>${_statusBadge(s.status)}</div>
+      <p class="session-meta">This session's details are incomplete, so its controls can't be shown.</p>
+      <button class="btn btn-danger btn-sm" data-remove-broken="${s.id}">Remove this session</button>
+    </div>`;
 }
 
 function _statusBadge(status) {
@@ -304,6 +348,7 @@ function _wireSessionCard(s) {
   if (s.status === "live") buttons.push(`<button class="btn btn-secondary btn-sm" data-action="pause">Pause</button>`);
   if (s.status === "live" || s.status === "paused") buttons.push(`<button class="btn btn-secondary btn-sm" data-action="reset">Reset timer</button>`);
   if (s.status === "ready" || s.status === "paused") buttons.push(`<button class="btn btn-ghost btn-sm" data-action="clear-history">Clear history</button>`);
+  if (s.status === "ready") buttons.push(`<button class="btn btn-danger btn-sm" data-action="cancel">Cancel session</button>`);
   if (s.status === "live" || s.status === "paused") buttons.push(`<button class="btn btn-danger btn-sm" data-action="end">End session</button>`);
   controls.innerHTML = buttons.join("");
 
@@ -312,12 +357,81 @@ function _wireSessionCard(s) {
   });
 }
 
+const EXPIRY_GRACE_MS = 6000; // the Security Rules accept submissions up to 5s after the deadline
+const _transitioning = new Map(); // sessionId -> label shown instead of the timer
+
+async function _runTransition(sessionId, label, fn) {
+  if (_transitioning.has(sessionId)) return;
+  _transitioning.set(sessionId, label);
+  try { await fn(); } finally { _transitioning.delete(sessionId); }
+}
+
+/**
+ * When a session's timer runs out, the students' screens submit their open
+ * question by themselves. A few seconds later (once the last submissions had
+ * time to arrive) the session is ended automatically — for EVERY subject, with
+ * no button press and no timer restart.
+ */
+function _autoEndExpiredSessions() {
+  AdminState.sessions.forEach((s) => {
+    if (s.status !== "live" || !s.deadline || _transitioning.has(s.id)) return;
+    if (Date.now() < s.deadline.toMillis() + EXPIRY_GRACE_MS) return;
+    _runTransition(s.id, "Finishing…", () => _endAfterTimeout(s))
+      .catch((err) => console.error("[auto-end on timeout]", err));
+  });
+}
+
+async function _endAfterTimeout(session) {
+  await adminDb.collection("sessions").doc(session.id).update({
+    status: "ended", deadline: null,
+    endedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+  });
+  await _syncSessionStateToAll({ ...session, status: "ended", deadline: null }, {});
+  try { await _finalizeSession(session); } catch (err) { console.error("[finalize session]", err); }
+  showToast(`${session.subjectName} finished — the time was up.`, "success");
+}
+
+/**
+ * Spelling Bee only: once EVERY student has answered their last word, end the
+ * session (and so the timer) automatically. The participant counters are only
+ * a trigger — before ending, the answers records themselves are checked.
+ */
+async function _maybeAutoEndWhenAllDone(sessionId, entries) {
+  const s = AdminState.sessions.find((x) => x.id === sessionId);
+  if (!s || s.status !== "live" || s.subjectType !== "spelling" || _transitioning.has(sessionId)) return;
+  if (entries.length === 0 || entries.length < s.studentIds.length) return;
+  if (!entries.every((e) => (e.answeredCount || 0) >= (e.totalQuestions || s.questionCount))) return;
+
+  await _runTransition(sessionId, "Finishing…", async () => {
+    try {
+      for (const studentId of s.studentIds) {
+        const snap = await adminDb.collection("sessions").doc(sessionId).collection("participants").doc(studentId).collection("answers").get();
+        if (snap.docs.some((d) => d.data().answered !== true)) return; // not really done
+      }
+      await adminDb.collection("sessions").doc(sessionId).update({
+        status: "ended", deadline: null,
+        endedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+      await _syncSessionStateToAll({ ...s, status: "ended", deadline: null }, {});
+      try { await _finalizeSession(s); } catch (err) { console.error("[finalize session]", err); }
+      showToast("Every student has finished — the Spelling Bee has ended.", "success");
+    } catch (err) {
+      console.error("[auto-end when all done]", err);
+    }
+  });
+}
+
 function _tickTimers() {
+  _autoEndExpiredSessions();
   document.querySelectorAll("[data-timer-for]").forEach((el) => {
     const id = el.dataset.timerFor;
     const s = AdminState.sessions.find((x) => x.id === id);
     if (!s) return;
-    if (s.status === "live" && s.deadline) {
+    if (_transitioning.has(id)) {
+      el.textContent = _transitioning.get(id);
+    } else if (s.status === "live" && s.deadline) {
       const remaining = Math.max(0, Math.round((s.deadline.toMillis() - Date.now()) / 1000));
       el.textContent = formatDuration(remaining);
     } else if (s.status === "paused") {
@@ -335,6 +449,7 @@ function _attachLeaderboardListener(sessionId) {
     (snap) => {
       const entries = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       _renderSessionLeaderboard(sessionId, entries);
+      _maybeAutoEndWhenAllDone(sessionId, entries);
     },
     (err) => {
       console.error("[leaderboard listener]", err);
@@ -355,16 +470,16 @@ function _renderSessionLeaderboard(sessionId, entries) {
       <thead><tr><th>#</th><th>Student</th><th>Progress</th><th>Score</th></tr></thead>
       <tbody>
         ${ranked
-          .map(
-            (r) => `
+      .map(
+        (r) => `
           <tr>
             <td class="leaderboard-rank">${r.rank}</td>
             <td><div class="leaderboard-name-cell">${avatarImgHtml(r, 34)}<span>${escapeHtml(r.name)}</span></div></td>
             <td class="leaderboard-bar-cell"><div class="progress-track"><div class="progress-fill" style="width:${r.percentage}%;"></div></div></td>
             <td class="leaderboard-pct">${r.answeredCount || 0}/${r.totalQuestions} · ${r.percentage || 0}%</td>
           </tr>`
-          )
-          .join("")}
+      )
+      .join("")}
       </tbody>
     </table>
   `;
@@ -376,15 +491,31 @@ async function _handleSessionAction(session, action) {
   try {
     if (action === "start") await _startSession(session);
     else if (action === "pause") await _pauseSession(session);
-    else if (action === "reset") await _resetSession(session);
-    else if (action === "end") await _endSession(session);
-    else if (action === "clear-history") await _confirmClearHistory(session);
+    else if (action === "reset") await _runTransition(session.id, "Resetting…", () => _resetSession(session));
+    else if (action === "end") await _runTransition(session.id, "Ending…", () => _endSession(session));
+    else if (action === "cancel") await _confirmCancelSession(session);
+    else if (action === "clear-history") {
+      const snap = await adminDb.collection("sessions").doc(session.id).collection("participants").get();
+      if (!snap.docs.some((d) => (d.data().answeredCount || 0) > 0)) {
+        showToast("Nothing to clear yet — no student has submitted an answer in this session.", "info", 5000);
+        return;
+      }
+      await _confirmClearHistory(session);
+    }
   } catch (err) {
     showErrorToast(err);
   }
 }
 
 async function _startSession(session) {
+  // A student may only be in ONE running session at a time.
+  const busy = _studentsCurrentlyActive(session.id);
+  const clashes = (session.studentIds || []).filter((id) => busy.has(id))
+    .map((id) => (AdminState.students.find((st) => st.id === id) || {}).name || "A student");
+  if (clashes.length) {
+    showToast(`${clashes.join(", ")} ${clashes.length > 1 ? "are" : "is"} already in another running session. End that session first.`, "error", 7000);
+    return;
+  }
   const remainingSeconds = session.status === "paused" ? session.remainingSeconds : session.timerSeconds;
   const deadline = firebase.firestore.Timestamp.fromMillis(Date.now() + remainingSeconds * 1000);
   const sessionRef = adminDb.collection("sessions").doc(session.id);
@@ -452,7 +583,82 @@ async function _endSession(session) {
     updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
   });
   await _syncSessionStateToAll({ ...session, status: "ended", deadline: null, resetToken: newResetToken }, {});
+  try { await _finalizeSession(session); } catch (err) { console.error("[finalize session]", err); }
   showToast("Session ended. Find it under History.", "success");
+}
+
+/**
+ * Called once a session has ended. Recomputes every student's score from the
+ * tamper-proof answers records, writes the official numbers back onto the
+ * participant docs (so the Display shows final results), and stores a summary
+ * on the session doc for the History page.
+ */
+async function _finalizeSession(session) {
+  const results = await _computeSessionResults(session);
+  if (results.length === 0) return;
+
+  const ops = results.map((r) => ({
+    ref: adminDb.collection("sessions").doc(session.id).collection("participants").doc(r.studentId),
+    data: {
+      correctCount: r.correctCount,
+      answeredCount: r.rows.filter((x) => x.answered === true).length,
+      totalQuestions: r.totalQuestions,
+      percentage: r.percentage,
+      status: "done",
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    },
+  }));
+  // Smart-graded answers: store the teacher-side re-grade so students see the official result.
+  results.forEach((r) => {
+    r.rows.filter((row) => row._needsWrite).forEach((row) => {
+      ops.push({
+        ref: adminDb.collection("sessions").doc(session.id).collection("participants").doc(r.studentId).collection("answers").doc(row.id),
+        data: { isCorrect: row.isCorrect },
+      });
+    });
+  });
+  await _commitOpsInChunks(ops, "update");
+
+  const pcts = results.map((r) => r.percentage);
+  const summary = {
+    participantCount: results.length,
+    questionCount: results[0].totalQuestions,
+    averagePercentage: Math.round(pcts.reduce((a, b) => a + b, 0) / pcts.length),
+    highestPercentage: Math.max(...pcts),
+    lowestPercentage: Math.min(...pcts),
+    winners: results.filter((r) => r.isWinner).map((r) => r.name),
+    results: results.map((r) => ({
+      studentId: r.studentId, name: r.name, rank: r.rank,
+      correctCount: r.correctCount, totalQuestions: r.totalQuestions, percentage: r.percentage,
+    })),
+    finalizedAtMs: Date.now(),
+  };
+  await adminDb.collection("sessions").doc(session.id).update({ summary });
+}
+
+async function _confirmCancelSession(session) {
+  openModal(
+    `
+    <h3>Cancel this session?</h3>
+    <p>"${escapeHtml(session.subjectName)}" hasn't started, so nothing is lost. It will be removed completely.</p>
+    <div style="display:flex; gap:10px; margin-top:20px;">
+      <button type="button" class="btn btn-secondary" id="cancel-btn">Keep it</button>
+      <button type="button" class="btn btn-danger" id="confirm-btn">Cancel session</button>
+    </div>
+  `,
+    (modal) => {
+      modal.querySelector("#cancel-btn").addEventListener("click", closeModal);
+      modal.querySelector("#confirm-btn").addEventListener("click", async () => {
+        const btn = modal.querySelector("#confirm-btn");
+        btn.disabled = true;
+        try {
+          await _deleteSessionCompletely(session);
+          closeModal();
+          showToast("Session cancelled.", "success");
+        } catch (err) { showErrorToast(err); btn.disabled = false; }
+      });
+    }
+  );
 }
 
 async function _confirmClearHistory(session) {
@@ -482,7 +688,7 @@ async function _clearSessionHistory(session) {
   const ops = [];
   for (const studentId of session.studentIds) {
     const participantRef = adminDb.collection("sessions").doc(session.id).collection("participants").doc(studentId);
-    const newOrder = shuffleArray(session.questionIds);
+    const newOrder = session.subjectType === "spelling" ? session.questionIds.slice() : shuffleArray(session.questionIds);
     ops.push({
       ref: participantRef,
       data: {
@@ -506,7 +712,7 @@ async function deleteSession(session) {
   openModal(
     `
     <h3>Permanently delete this session?</h3>
-    <p>This deletes "${escapeHtml(session.subjectName)}" (${formatDateTime(session.endedAt)}) and every student's results for it. This can't be undone.</p>
+    <p>This deletes "${escapeHtml(session.subjectName || "this session")}" and every student's results for it. This can't be undone.</p>
     <div style="display:flex; gap:10px; margin-top:20px;">
       <button type="button" class="btn btn-secondary" id="cancel-btn">Cancel</button>
       <button type="button" class="btn btn-danger" id="confirm-btn">Delete permanently</button>
@@ -527,7 +733,7 @@ async function deleteSession(session) {
 
 async function _deleteSessionCompletely(session) {
   const ops = [];
-  for (const studentId of session.studentIds) {
+  for (const studentId of (session.studentIds || [])) {
     const participantRef = adminDb.collection("sessions").doc(session.id).collection("participants").doc(studentId);
     (session.questionIds || []).forEach((qId) => ops.push({ ref: participantRef.collection("answers").doc(qId) }));
     ops.push({ ref: participantRef });
