@@ -87,21 +87,21 @@ function openCreateSessionModal() {
         </select>
       </div>
       <div class="field">
-        <label for="cs-timer">Timer (minutes, 1–60)</label>
-        <input type="number" id="cs-timer" min="1" max="60" step="1" value="10" required>
+        <label for="cs-timer">Timer (minutes, 1–120)</label>
+        <input type="number" id="cs-timer" min="1" max="120" step="1" value="10" required>
       </div>
       <div class="field">
         <label>Students (choose 2–10)</label>
         <div class="checklist">
           ${AdminState.students
-      .map((s) => {
-        const disabled = busy.has(s.id);
-        return `<label class="${disabled ? "disabled" : ""}">
+            .map((s) => {
+              const disabled = busy.has(s.id);
+              return `<label class="${disabled ? "disabled" : ""}">
                 <input type="checkbox" value="${s.id}" ${disabled ? "disabled" : ""}>
                 ${escapeHtml(s.name)} ${disabled ? "<em>(busy in another session)</em>" : ""}
               </label>`;
-      })
-      .join("")}
+            })
+            .join("")}
         </div>
       </div>
       <p id="cs-error" class="form-error" role="alert"></p>
@@ -123,8 +123,8 @@ function openCreateSessionModal() {
         const timerMinutes = parseInt(modal.querySelector("#cs-timer").value, 10);
         const studentIds = Array.from(modal.querySelectorAll('input[type="checkbox"]:checked')).map((c) => c.value);
 
-        if (!Number.isInteger(timerMinutes) || timerMinutes < 1 || timerMinutes > 60) {
-          errEl.textContent = "Timer must be a whole number of minutes between 1 and 60.";
+        if (!Number.isInteger(timerMinutes) || timerMinutes < 1 || timerMinutes > 120) {
+          errEl.textContent = "Timer must be a whole number of minutes between 1 and 120.";
           return;
         }
         if (studentIds.length < 2 || studentIds.length > 10) {
@@ -470,16 +470,16 @@ function _renderSessionLeaderboard(sessionId, entries) {
       <thead><tr><th>#</th><th>Student</th><th>Progress</th><th>Score</th></tr></thead>
       <tbody>
         ${ranked
-      .map(
-        (r) => `
+          .map(
+            (r) => `
           <tr>
             <td class="leaderboard-rank">${r.rank}</td>
             <td><div class="leaderboard-name-cell">${avatarImgHtml(r, 34)}<span>${escapeHtml(r.name)}</span></div></td>
             <td class="leaderboard-bar-cell"><div class="progress-track"><div class="progress-fill" style="width:${r.percentage}%;"></div></div></td>
             <td class="leaderboard-pct">${r.answeredCount || 0}/${r.totalQuestions} · ${r.percentage || 0}%</td>
           </tr>`
-      )
-      .join("")}
+          )
+          .join("")}
       </tbody>
     </table>
   `;
